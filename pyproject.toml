@@ -3,15 +3,19 @@ name = "motioncore-cht-template"
 version = "0.1.0"
 description = "Шаблон репозитория для ЧВТ"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.11"
 dependencies = [
-    "motion-core-API @ ./motion-core-API-0.1.2.tar.gz",
-    "motorcortex-python>=0.23.3",
+    "certifi>=2026.7.22",
+    "motorcortex-python==0.25.1",
+    "requests",
+    "PyQt5==5.15.11",
+    "opencv-python",
+    "numpy",
+    "matplotlib",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "ultralytics",
+    "pynng",
+    "protobuf"
 ]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.uv]
-package = false

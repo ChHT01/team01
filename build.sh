@@ -12,6 +12,12 @@ API_GIT_REF=""
 
 API_TARBALL="motion-core-API-0.1.2.tar.gz"
 
+# Архив с образом QEMU и скриптами запуска (лежит рядом с build.sh)
+QEMU_TARBALL="qemu-motioncore-image-202509.tar.xz"
+
+# Список файлов сертификатов, лежащих рядом с build.sh
+CHROME_CERT_FILES=("cert1.pem" "cert2.pem" "cert3.pem")
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
@@ -28,24 +34,48 @@ run_apt() {
 
 ensure_system_deps() {
     local missing=()
+    local apt_pkgs=(
+        curl wget git ca-certificates
+        qtcreator obs-studio python3-tk
+        v4l-utils guvcview
+        qemu-system-x86
+        libnss3-tools
+    )
 
-    command -v curl >/dev/null 2>&1 || missing+=(curl)
-    command -v git >/dev/null 2>&1 || missing+=(git)
-    # ca-certificates нужны curl для HTTPS-установки UV
-    if ! dpkg -s ca-certificates >/dev/null 2>&1; then
-        missing+=(ca-certificates)
+    for pkg in "${apt_pkgs[@]}"; do
+        if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed"; then
+            missing+=("$pkg")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "Устанавливаю системные пакеты: ${missing[*]}"
+        export DEBIAN_FRONTEND=noninteractive
+        run_apt update -y
+        # Флаг --ignore-missing предотвращает сбой скрипта, если какой-то пакет переименован
+        run_apt install -y --ignore-missing "${missing[@]}"
+        echo "Системные пакеты проверены/установлены."
+    else
+        echo "Системные apt-пакеты уже установлены."
     fi
 
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        echo "Системные зависимости уже установлены: curl, git"
-        return
+    # Установка VS Code через snap
+    if ! command -v code >/dev/null 2>&1; then
+        echo "Устанавливаю VS Code..."
+        if command -v snap >/dev/null 2>&1; then
+            if [[ "${EUID}" -eq 0 ]]; then
+                snap install --classic code
+            elif command -v sudo >/dev/null 2>&1; then
+                sudo snap install --classic code
+            else
+                echo "Ошибка: нужны права root/sudo для установки snap-пакетов." >&2
+            fi
+        else
+            echo "Ошибка: snap не найден, установите VS Code вручную." >&2
+        fi
+    else
+        echo "VS Code уже установлен."
     fi
-
-    echo "Устанавливаю системные пакеты: ${missing[*]}"
-    export DEBIAN_FRONTEND=noninteractive
-    run_apt update -y
-    run_apt install -y "${missing[@]}"
-    echo "Системные пакеты установлены."
 }
 
 ensure_uv() {
@@ -63,7 +93,7 @@ ensure_uv() {
         echo "Добавьте ~/.local/bin в PATH и запустите скрипт снова." >&2
         exit 1
     fi
-
+    source "${HOME}/.bashrc"
     echo "UV установлен: $(uv --version)"
 }
 
@@ -73,45 +103,34 @@ ensure_venv() {
         return
     fi
 
-    echo "Python-окружение не найдено. Создаю .venv..."
-    uv venv
+    echo "Python-окружение не найдено. Создаю .venv с Python 3.10..."
+    # uv автоматически скачает переносимый бинарник Python 3.10, если в системе версия выше
+    uv venv --python 3.10
     echo "Окружение создано: ${ROOT}/.venv"
 }
 
-write_default_pyproject() {
-    # Базовый pyproject (как в шаблоне). При отсутствии tar.gz ссылка на архив
-    # будет убрана перед sync, а пакет поставят из git.
+write_clean_pyproject() {
     cat > pyproject.toml <<'EOF'
 [project]
 name = "motioncore-cht-template"
 version = "0.1.0"
 description = "Шаблон репозитория для ЧВТ"
-readme = "README.md"
-requires-python = ">=3.10"
+readme = "participant.md"
+requires-python = ">=3.10,<3.11"
 dependencies = [
-    "motion-core-API @ ./motion-core-API-0.1.2.tar.gz",
-    "motorcortex-python>=0.23.3",
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.uv]
-package = false
-EOF
-}
-
-write_pyproject_without_tarball() {
-    cat > pyproject.toml <<'EOF'
-[project]
-name = "motioncore-cht-template"
-version = "0.1.0"
-description = "Шаблон репозитория для ЧВТ"
-readme = "README.md"
-requires-python = ">=3.10"
-dependencies = [
-    "motorcortex-python>=0.23.3",
+    "certifi>=2026.7.22",
+    "motorcortex-python==0.25.1",
+    "requests",
+    "PyQt5==5.15.11",
+    "opencv-python",
+    "numpy",
+    "matplotlib",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "ultralytics",
+    "pynng",
+    "protobuf",
 ]
 
 [build-system]
@@ -141,7 +160,6 @@ install_api_from_git() {
     local spec
     spec="$(api_git_install_url)"
     echo "Архив ${API_TARBALL} не найден. Ставлю motion-core-API из git-репозитория..."
-    # Спека с токеном не печатаем целиком — только хост/путь.
     echo "Источник: git+https://***@${API_GIT_REPO}${API_GIT_REF:+@${API_GIT_REF}}"
     uv pip install "${spec}"
     echo "motion-core-API установлен из git."
@@ -149,29 +167,27 @@ install_api_from_git() {
 
 ensure_pyproject_and_deps() {
     if [[ ! -f pyproject.toml ]]; then
-        echo "pyproject.toml не найден. Создаю..."
-        write_default_pyproject
-        echo "pyproject.toml создан."
+        echo "pyproject.toml не найден. Создаю чистый pyproject.toml..."
+        write_clean_pyproject
     else
-        echo "pyproject.toml уже есть: ${ROOT}/pyproject.toml"
+        if grep -q 'motion-core-api' pyproject.toml || grep -q 'motion-core-API' pyproject.toml; then
+            echo "Обнаружены ссылки на motion-core в pyproject.toml. Перезаписываю на чистый..."
+            write_clean_pyproject
+        fi
+        echo "pyproject.toml актуален: ${ROOT}/pyproject.toml"
     fi
+
+    echo "Синхронизирую зависимости проекта через uv sync..."
+    uv sync
 
     if [[ -f "${API_TARBALL}" ]]; then
-        echo "Найден локальный архив ${API_TARBALL}. Синхронизирую зависимости..."
-        uv sync
-        return
+        echo "Найден локальный архив ${API_TARBALL}. Устанавливаю в окружение..."
+        uv pip install "${ROOT}/${API_TARBALL}"
+        echo "Библиотека установлена."
+    else
+        echo "Локальный архив ${API_TARBALL} отсутствует — fallback на git..."
+        install_api_from_git
     fi
-
-    echo "Локальный архив ${API_TARBALL} отсутствует — fallback на установку API из git."
-    # Убираем ссылку на отсутствующий tar.gz, иначе uv sync упадёт.
-    if grep -q 'motion-core-API-0.1.2.tar.gz' pyproject.toml; then
-        write_pyproject_without_tarball
-        echo "pyproject.toml обновлён: зависимость API будет поставлена из git."
-    fi
-
-    echo "Синхронизирую остальные зависимости из pyproject.toml..."
-    uv sync
-    install_api_from_git
 }
 
 configure_origin() {
@@ -194,7 +210,6 @@ configure_origin() {
 }
 
 ensure_git() {
-    # Проверяем именно локальный .git в каталоге скрипта (не родительский репозиторий).
     if [[ -e .git ]]; then
         echo "Предупреждение: git-репозиторий уже инициализирован в ${ROOT}"
         read -r -p "Переинициализировать репозиторий? [y/N] " answer
@@ -223,243 +238,40 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-*.o
-*.a
-*.dylib
-*.pyd
-*.egg
-*.egg-info/
-.eggs/
-dist/
+.Python
 build/
 develop-eggs/
+dist/
 downloads/
+eggs/
+.eggs/
+lib/
+lib64/
 parts/
 sdist/
 var/
 wheels/
 share/python-wheels/
-*.manifest
-*.spec
-pip-log.txt
-pip-delete-this-directory.txt
-.Python
-MANIFEST
+*.egg-info/
+.installed.cfg
+*.egg
 
 # Virtual environments
 .venv/
 venv/
 ENV/
 env/
-.env/
 
 # UV / packaging
-uv.lock
 .uv/
 
-# Test / coverage / typecheck caches
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-.cache/
-.hypothesis/
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-
-# Jupyter
-.ipynb_checkpoints/
+# Certificates
+*.pem
 
 # IDE / OS junk
 .idea/
 .vscode/
-*.swp
-*.swo
-*~
 .DS_Store
-Thumbs.db
-desktop.ini
-
-# Logs / local secrets
-*.log
-.env
-.env.*
-!.env.example
-secrets/
-*.pem
-*.key
-
-# --- Neural network weights & ML dumps (any depth) ---
-*.pt
-*.pth
-*.pt2
-*.ckpt
-*.safetensors
-*.onnx
-*.pb
-*.h5
-*.hdf5
-*.keras
-*.tflite
-*.pkl
-*.pickle
-*.joblib
-*.npy
-*.npz
-*.npzz
-*.mat
-*.engine
-*.trt
-*.mlmodel
-*.params
-*.gguf
-*.ggml
-*.weights
-*.torchscript
-*.bin
-
-# --- Media: photos / video / audio (any depth) ---
-*.jpg
-*.jpeg
-*.png
-*.gif
-*.bmp
-*.tif
-*.tiff
-*.webp
-*.heic
-*.heif
-*.ico
-*.svg
-*.raw
-*.cr2
-*.nef
-*.orf
-*.sr2
-*.mp4
-*.avi
-*.mov
-*.mkv
-*.webm
-*.wmv
-*.flv
-*.m4v
-*.mpeg
-*.mpg
-*.3gp
-*.ogv
-*.mp3
-*.wav
-*.flac
-*.aac
-*.ogg
-*.m4a
-*.wma
-
-# --- Robotics / CV binary dumps (any depth) ---
-*.bag
-*.mcap
-*.pcd
-*.ply
-*.stl
-*.obj
-*.fbx
-*.dae
-*.blend
-*.blend1
-*.usd
-*.usda
-*.usdc
-*.abc
-*.rosbag
-*.ulg
-*.csv.gz
-*.parquet
-
-# Archives (any depth); keep MotionCore API package in the repo
-*.zip
-*.rar
-*.7z
-*.tar
-*.tar.gz
-*.tgz
-*.tar.bz2
-*.tbz2
-*.tar.xz
-*.txz
-*.iso
-*.dmg
-!motion-core-API-*.tar.gz
-
-# Native / school binary junk (any depth)
-*.exe
-*.dll
-*.so.*
-*.class
-*.jar
-*.war
-*.apk
-*.deb
-*.rpm
-*.msi
-*.out
-*.lib
-*.wasm
-*.pyc
-*.pyo
-core
-core.*
-*.core
-*.su
-*.idb
-*.pdb
-*.ilk
-*.exp
-*.map
-*.elf
-*.hex
-*.img
-*.qcow2
-*.vdi
-*.vmdk
-
-# Large local data dumps (common folder names, any depth)
-**/data/
-**/datasets/
-**/dataset/
-**/weights/
-**/checkpoints/
-**/runs/
-**/outputs/
-**/output/
-**/results/
-**/logs/
-**/tmp/
-**/temp/
-**/cache/
-**/.cache/
-**/media/
-**/videos/
-**/images/
-**/photos/
-**/recordings/
-**/captures/
-**/dumps/
-**/models/
-**/pretrained/
-**/snapshots/
-**/artifacts/
-**/wandb/
-**/mlruns/
-**/lightning_logs/
-**/tensorboard/
-**/tb_logs/
 EOF
 }
 
@@ -469,30 +281,157 @@ ensure_gitignore() {
         return
     fi
 
-    echo ".gitignore не найден. Создаю с исключениями для Python / CV / робототехники..."
+    echo ".gitignore не найден. Создаю..."
     write_default_gitignore
     echo ".gitignore создан."
 }
 
+setup_qemu_image() {
+    local target_dir="${HOME}/robot_sim"
+    local archive_path="${ROOT}/${QEMU_TARBALL}"
+
+    echo "---"
+    echo "Настраиваю локальный образ QEMU..."
+
+    if [[ -f "${archive_path}" ]]; then
+        echo "Найден архив образа QEMU: ${QEMU_TARBALL}"
+        mkdir -p "${target_dir}"
+        
+        echo "Распаковываю в ${target_dir}..."
+        tar -xf "${archive_path}" -C "${target_dir}"
+        
+        echo "Назначаю права на исполнение всем .sh скриптам..."
+        find "${target_dir}" -type f -name "*.sh" -exec chmod +x {} +
+        
+        echo "Готово. Основной скрипт запуска доступен по пути:"
+        find "${target_dir}" -type f -name "start-qemu-motioncore.sh"
+    else
+        echo "Предупреждение: Архив ${QEMU_TARBALL} не найден рядом со скриптом!" >&2
+        echo "Пропускаю установку образа QEMU."
+    fi
+}
+
+install_chrome() {
+    if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1; then
+        echo "Google Chrome уже установлен."
+        return
+    fi
+
+    echo "---"
+    echo "Скачиваю и устанавливаю Google Chrome..."
+    local temp_deb="/tmp/google-chrome-stable_current_amd64.deb"
+    
+    wget -q -O "${temp_deb}" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+    
+    export DEBIAN_FRONTEND=noninteractive
+    run_apt install -y "${temp_deb}"
+    
+    rm -f "${temp_deb}"
+    echo "Google Chrome успешно установлен."
+}
+
+install_certs_all() {
+    local nssdb_dir="${HOME}/.pki/nssdb"
+    local system_ca_dir="/usr/local/share/ca-certificates/motioncore"
+    
+    echo "---"
+    echo "Устанавливаю SSL-сертификаты (в Chrome NSS и системное хранилище ОС)..."
+    
+    # 1. Подготовка базы NSS для Chrome
+    mkdir -p "${nssdb_dir}"
+    if [[ ! -f "${nssdb_dir}/cert9.db" ]] && [[ ! -f "${nssdb_dir}/cert8.db" ]]; then
+        certutil -N -d "sql:${nssdb_dir}" --empty-password
+    fi
+
+    # 2. Подготовка системной папки сертификатов
+    if [[ "${EUID}" -eq 0 ]] || command -v sudo >/dev/null 2>&1; then
+        run_apt install -y ca-certificates >/dev/null 2>&1 || true
+        if [[ "${EUID}" -eq 0 ]]; then
+            mkdir -p "${system_ca_dir}"
+        else
+            sudo mkdir -p "${system_ca_dir}"
+        fi
+    fi
+
+    for cert_file in "${CHROME_CERT_FILES[@]}"; do
+        local cert_path="${ROOT}/${cert_file}"
+        local cert_name="MotionCore_${cert_file}"
+        
+        if [[ ! -f "${cert_path}" ]]; then
+            echo "Предупреждение: Сертификат ${cert_file} не найден рядом со скриптом. Пропускаю."
+            continue
+        fi
+
+        # Добавляем в базу NSS Chrome
+        certutil -d "sql:${nssdb_dir}" -A -t "C,," -n "${cert_name}" -i "${cert_path}"
+
+        # Копируем в доверенные сертификаты всей ОС Ubuntu
+        local crt_name="${cert_file%.*}.crt"
+        if [[ "${EUID}" -eq 0 ]]; then
+            cp "${cert_path}" "${system_ca_dir}/${crt_name}"
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo cp "${cert_path}" "${system_ca_dir}/${crt_name}"
+        fi
+        
+        echo "Сертификат ${cert_file} успешно импортирован."
+    done
+
+    # Обновляем сертификаты в ОС
+    if [[ "${EUID}" -eq 0 ]]; then
+        update-ca-certificates >/dev/null 2>&1 || true
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo update-ca-certificates >/dev/null 2>&1 || true
+    fi
+}
+
+cleanup_files() {
+    echo "---"
+    echo "Очищаю рабочую директорию от временных файлов и инсталляторов..."
+
+    # Удаляем архивы
+    rm -f "${ROOT}/${API_TARBALL}"
+    rm -f "${ROOT}/${QEMU_TARBALL}"
+
+    # Удаляем сертификаты
+    for cert in "${CHROME_CERT_FILES[@]}"; do
+        rm -f "${ROOT}/${cert}"
+    done
+
+    # Удаляем служебный README (остаётся только participant.md)
+    rm -f "${ROOT}/README.md"
+
+    # Удаляем сам build.sh в последний момент
+    # rm -f "${BASH_SOURCE[0]}"
+
+    echo "Очистка завершена. Оставлены только файлы участников."
+}
+
+# --- ОСНОВНОЙ ПОТОК ВЫПОЛНЕНИЯ ---
 ensure_system_deps
 ensure_uv
 ensure_venv
 ensure_pyproject_and_deps
 ensure_gitignore
 ensure_git
+setup_qemu_image
+install_chrome
+install_certs_all
+cleanup_files
 
 cat <<EOF
 
-Готово.
+---
+Готово! Установка завершена успешно.
+Рабочая директория очищена. Доступны:
+- examples/
+- participant.md
+- pyproject.toml
+- uv.lock
 
 Активация окружения:
-  source ${ROOT}/.venv/bin/activate
+  source .venv/bin/activate
 
-Запуск Python-скриптов через UV (активация не обязательна):
-  uv run python your_script.py
-  uv run your_script.py
-
-Примеры:
-  uv run python main.py
-  uv run python scripts/demo.py
+Запуск скриптов:
+  uv run python script.py
+  uv run code .
 EOF
