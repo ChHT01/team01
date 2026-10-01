@@ -240,3 +240,4 @@ core.*
 **/lightning_logs/
 **/tensorboard/
 **/tb_logs/
+person_photos/
