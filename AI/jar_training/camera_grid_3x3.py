@@ -1,3 +1,6 @@
+#uv run python camera_grid_3x3.py --weights runs_jars/jars_20261001_163317/weights/best.pt --ip 192.168.2.110
+
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """SmartCamera: распознавание 9 ячеек, без команд движения роботу."""
