@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Камера робота: вывод видео + getPerson() + автофото при появлении руки.
+Максимум 4 фото за сессию.
 """
 
 import os
@@ -22,9 +23,11 @@ PERSON_CHECK_INTERVAL = 0.5
 # Папка, куда сохраняются снимки
 SAVE_DIR = "person_photos"
 
-# Минимальный интервал между снимками (в секундах),
-# чтобы не сохранять по 15 фото в секунду
+# Минимальный интервал между снимками (в секундах)
 PHOTO_COOLDOWN = 2.0
+
+# Максимум фото за сессию
+MAX_PHOTOS = 4
 
 # ----------------------------------------------------------------------
 # ПОЛУЧЕНИЕ КАДРА
@@ -55,12 +58,7 @@ def grab_frame(camera):
 # ПРОВЕРКА ЧЕЛОВЕКА
 # ----------------------------------------------------------------------
 def check_person(camera) -> int:
-    """
-    Возвращает:
-      1  — человек обнаружен,
-      0  — человек не обнаружен,
-     -1  — ошибка / метод недоступен.
-    """
+    """1 — обнаружен, 0 — нет, -1 — ошибка / метод недоступен."""
     if not hasattr(camera, "getPerson"):
         return -1
     try:
@@ -76,7 +74,6 @@ def check_person(camera) -> int:
 # СОХРАНЕНИЕ КАДРА
 # ----------------------------------------------------------------------
 def save_frame(frame, counter: int) -> str:
-    """Сохраняет кадр в SAVE_DIR и возвращает путь к файлу."""
     os.makedirs(SAVE_DIR, exist_ok=True)
     filename = time.strftime("person_%Y-%m-%d_%H-%M-%S_") + f"{counter:04d}.jpg"
     path = os.path.join(SAVE_DIR, filename)
@@ -108,6 +105,7 @@ def main():
 
     os.makedirs(SAVE_DIR, exist_ok=True)
     print(f"[INFO] Снимки сохраняются в: {os.path.abspath(SAVE_DIR)}")
+    print(f"[INFO] Максимум фото за сессию: {MAX_PHOTOS}")
     print("[INFO] Видео запущено. 'q' — выход.")
 
     interval = 1.0 / FPS
@@ -133,13 +131,18 @@ def main():
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                                 (0, 255, 0), 2)
 
+                # Счётчик фото в углу окна
+                cv2.putText(frame, f"photos: {photo_counter}/{MAX_PHOTOS}", (20, 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                            (255, 255, 0), 2)
+
                 try:
                     cv2.imshow(WINDOW_TITLE, frame)
                 except Exception as e:
                     print(f"[CAM] Не удалось показать кадр: {e}")
                     break
 
-            # --- Периодическая проверка getPerson ---
+            # --- Проверка getPerson ---
             now = time.time()
             if now - last_person_check >= PERSON_CHECK_INTERVAL:
                 last_person_check = now
@@ -152,15 +155,20 @@ def main():
                 else:
                     print("[CAM] getPerson() недоступен или вернул ошибку.")
 
-            # --- Фото, если рука в кадре и кадр получен ---
+            # --- Фото ---
             if (person_state == 1
                 and frame is not None
+                and photo_counter < MAX_PHOTOS
                 and now - last_photo_time >= PHOTO_COOLDOWN):
+
                 path = save_frame(frame, photo_counter)
                 if path:
                     photo_counter += 1
                     last_photo_time = now
-                    print(f"[CAM] Фото сохранено: {path}")
+                    print(f"[CAM] Фото {photo_counter}/{MAX_PHOTOS} сохранено: {path}")
+
+                    if photo_counter >= MAX_PHOTOS:
+                        print(f"[CAM] Достигнут лимит {MAX_PHOTOS} фото. Больше не сохраняю.")
 
             # --- Выход по 'q' ---
             if cv2.waitKey(1) & 0xFF == ord('q'):
